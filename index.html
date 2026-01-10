@@ -7,6 +7,7 @@
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
     canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+
     .hud {
       position: fixed; left: 12px; top: 12px; z-index: 10;
       color: #fff; background: rgba(0,0,0,0.35);
@@ -20,9 +21,10 @@
 </head>
 <body>
   <canvas id="c"></canvas>
+
   <div class="hud">
     <b>Kumo Room</b>
-    Drag to rotate · Pinch/scroll to zoom
+    Drag to look · Pinch/scroll to lean
   </div>
 
   <!-- Import map so OrbitControls/GLTFLoader resolve "three" correctly -->
@@ -51,68 +53,74 @@
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 5000);
 
-    // Lighting (simple defaults; later you can bake lighting in Blender)
+    // Simple default lighting (you can bake lighting in Blender later)
     scene.add(new THREE.HemisphereLight(0xffffff, 0x222222, 1.1));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
     dir.position.set(5, 10, 5);
     scene.add(dir);
 
-    // Controls (mobile friendly)
+    // Controls (we'll configure to feel like "standing in the room")
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.07;
-    controls.enableZoom = true;
-    controls.zoomSpeed = 0.9;
-    controls.enablePan = true;                // set false if you want locked center
-    controls.screenSpacePanning = true;
-    controls.maxPolarAngle = Math.PI * 0.49;  // prevents flipping under the floor
+    controls.dampingFactor = 0.08;
+
+    controls.enablePan = false;          // no sliding around
+    controls.enableZoom = true;          // slight lean allowed
+    controls.zoomSpeed = 0.6;
+
+    // Natural up/down look limits
+    controls.minPolarAngle = Math.PI * 0.35;
+    controls.maxPolarAngle = Math.PI * 0.65;
+
+    controls.rotateSpeed = 0.6;
     renderer.domElement.style.touchAction = "none";
 
-    // Load local GLB (must be next to index.html)
+    // Standing placement config
+    const EYE_HEIGHT = 1.6; // meters-ish
+    let FLOOR_Y = 0;
+    let CENTER_X = 0;
+    let CENTER_Z = 0;
+
+    // Load local GLB (place kumo-room.glb next to this index.html)
     const ROOM_GLB_URL = "./kumo-room.glb";
     const loader = new GLTFLoader();
-
-    function frameRoom(root) {
-      const box = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      const center = new THREE.Vector3();
-      box.getSize(size);
-      box.getCenter(center);
-
-      // Center model at origin
-      root.position.sub(center);
-
-      // Look at origin
-      controls.target.set(0, 0, 0);
-
-      // Fit camera distance
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const fov = camera.fov * Math.PI / 180;
-      let distance = (maxDim / 2) / Math.tan(fov / 2);
-      distance *= 1.4;
-
-      // "standing height" feel
-      const eyeHeight = Math.max(1.2, size.y * 0.15);
-
-      camera.position.set(0, eyeHeight, distance);
-      camera.near = Math.max(0.01, maxDim / 1000);
-      camera.far = Math.max(1000, maxDim * 10);
-      camera.updateProjectionMatrix();
-
-      // Zoom limits
-      controls.minDistance = Math.max(0.05, maxDim / 100);
-      controls.maxDistance = Math.max(5, maxDim * 3);
-
-      controls.update();
-    }
 
     loader.load(
       ROOM_GLB_URL,
       (gltf) => {
         const room = gltf.scene;
         scene.add(room);
-        frameRoom(room);
-        console.log("GLB loaded ✅");
+
+        // Compute bounds
+        const box = new THREE.Box3().setFromObject(room);
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+
+        // Recenter room so its middle is at world origin (simplifies "middle of room")
+        room.position.sub(center);
+
+        // Recompute after recenter
+        const box2 = new THREE.Box3().setFromObject(room);
+        const center2 = new THREE.Vector3();
+        box2.getCenter(center2);
+
+        FLOOR_Y = box2.min.y;
+        CENTER_X = center2.x;
+        CENTER_Z = center2.z;
+
+        // Put "you" in the middle at floor level + eye height
+        camera.position.set(CENTER_X, FLOOR_Y + EYE_HEIGHT, CENTER_Z);
+
+        // Controls rotate in place around your head position
+        controls.target.set(CENTER_X, FLOOR_Y + EYE_HEIGHT, CENTER_Z);
+
+        // Allow only a little "lean" zoom (optional)
+        controls.minDistance = 0.05;
+        controls.maxDistance = 1.2;
+
+        controls.update();
+
+        console.log("GLB loaded ✅", { floorY: FLOOR_Y, centerX: CENTER_X, centerZ: CENTER_Z });
       },
       (xhr) => {
         if (xhr.total) console.log("Loading:", Math.round((xhr.loaded / xhr.total) * 100) + "%");
@@ -131,6 +139,12 @@
     resize();
 
     function animate() {
+      // Lock "standing" height (prevents drift from touch gestures)
+      camera.position.y = FLOOR_Y + EYE_HEIGHT;
+
+      // Keep target locked to your head position (rotate in place)
+      controls.target.set(CENTER_X, FLOOR_Y + EYE_HEIGHT, CENTER_Z);
+
       controls.update();
       renderer.render(scene, camera);
       requestAnimationFrame(animate);
