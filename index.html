@@ -16,18 +16,20 @@
       font: 12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       user-select: none; pointer-events: none;
     }
-    .hud b { display:block; font-size: 13px; margin-bottom: 2px; }
+    .hud b { display:block; font-size: 13px; margin-bottom: 4px; }
+    .hud .small { opacity: 0.85; }
   </style>
 </head>
 <body>
-  <canvas id="c"></canvas>
+  <canvas id="c" tabindex="0"></canvas>
 
   <div class="hud">
     <b>Kumo Room</b>
-    Drag to look · Pinch/scroll to lean
+    <div class="small">Trackpad: 2-finger scroll = pan · pinch = zoom</div>
+    <div class="small">Touch: 1 finger = look · 2 fingers = pan/zoom</div>
+    <div class="small">Keys: WASD / Arrows move · Shift sprint</div>
   </div>
 
-  <!-- Import map so OrbitControls/GLTFLoader resolve "three" correctly -->
   <script type="importmap">
   {
     "imports": {
@@ -43,6 +45,7 @@
     import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
     const canvas = document.getElementById("c");
+    canvas.focus();
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -53,81 +56,205 @@
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 5000);
 
-    // Simple default lighting (you can bake lighting in Blender later)
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x222222, 1.1));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    // Lighting (bright defaults for interiors)
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x222222, 2.0));
+    const dir = new THREE.DirectionalLight(0xffffff, 2.0);
     dir.position.set(5, 10, 5);
     scene.add(dir);
 
-    // Controls (we'll configure to feel like "standing in the room")
+    // ===== OrbitControls =====
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
 
-    controls.enablePan = false;          // no sliding around
-    controls.enableZoom = true;          // slight lean allowed
-    controls.zoomSpeed = 0.6;
-
-    // Natural up/down look limits
-    controls.minPolarAngle = Math.PI * 0.35;
-    controls.maxPolarAngle = Math.PI * 0.65;
-
+    controls.enablePan = true;    // we’ll pan (trackpad + touch)
+    controls.enableZoom = true;   // pinch + wheel zoom
+    controls.zoomSpeed = 0.8;
     controls.rotateSpeed = 0.6;
+
+    // Touch gestures
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN
+    };
+
+    // Keep looking mostly level (feels "standing")
+    controls.minPolarAngle = Math.PI * 0.30;
+    controls.maxPolarAngle = Math.PI * 0.70;
+
     renderer.domElement.style.touchAction = "none";
 
-    // Standing placement config
-    const EYE_HEIGHT = 1.6; // meters-ish
+    // ===== Standing config =====
+    const EYE_HEIGHT = 1.6;
+    const FLOOR_PADDING = 0.05;
     let FLOOR_Y = 0;
-    let CENTER_X = 0;
-    let CENTER_Z = 0;
 
-    // Load local GLB (place kumo-room.glb next to this index.html)
-    const ROOM_GLB_URL = "./kumo-room.glb";
+    // ===== Room bounds (computed after GLB loads) =====
+    // We clamp to these so you can't leave the room.
+    let ROOM_MIN_X = -Infinity, ROOM_MAX_X = Infinity;
+    let ROOM_MIN_Z = -Infinity, ROOM_MAX_Z = Infinity;
+    const WALL_PADDING = 0.20; // keep you slightly away from walls (meters-ish)
+    let roomLoaded = false;
+
+    function clamp(v, min, max) {
+      return Math.min(max, Math.max(min, v));
+    }
+
+    // Clamp target/camera within room bounds on XZ plane
+    function clampToRoom() {
+      if (!roomLoaded) return;
+
+      const y = FLOOR_Y + FLOOR_PADDING + EYE_HEIGHT;
+
+      // 1) Clamp the "player" position = controls.target
+      const oldTargetX = controls.target.x;
+      const oldTargetZ = controls.target.z;
+
+      const newTargetX = clamp(oldTargetX, ROOM_MIN_X, ROOM_MAX_X);
+      const newTargetZ = clamp(oldTargetZ, ROOM_MIN_Z, ROOM_MAX_Z);
+
+      const dx = newTargetX - oldTargetX;
+      const dz = newTargetZ - oldTargetZ;
+
+      if (dx !== 0 || dz !== 0) {
+        // Shift BOTH target and camera by same delta to preserve view
+        controls.target.x = newTargetX;
+        controls.target.z = newTargetZ;
+        camera.position.x += dx;
+        camera.position.z += dz;
+      }
+
+      // Keep standing height
+      controls.target.y = y;
+      camera.position.y = y;
+
+      // 2) Also clamp the camera (in case zoom/rotate pushes it outside)
+      camera.position.x = clamp(camera.position.x, ROOM_MIN_X, ROOM_MAX_X);
+      camera.position.z = clamp(camera.position.z, ROOM_MIN_Z, ROOM_MAX_Z);
+    }
+
+    // ===== Keyboard movement =====
+    const keys = new Set();
+    window.addEventListener("keydown", (e) => {
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+      keys.add(e.key);
+    }, { passive: false });
+
+    window.addEventListener("keyup", (e) => {
+      keys.delete(e.key);
+    });
+
+    function getMoveInput() {
+      const forward = (keys.has("w") || keys.has("W") || keys.has("ArrowUp")) ? 1 : 0;
+      const back    = (keys.has("s") || keys.has("S") || keys.has("ArrowDown")) ? 1 : 0;
+      const left    = (keys.has("a") || keys.has("A") || keys.has("ArrowLeft")) ? 1 : 0;
+      const right   = (keys.has("d") || keys.has("D") || keys.has("ArrowRight")) ? 1 : 0;
+      return { forward, back, left, right, sprint: keys.has("Shift") };
+    }
+
+    const WALK_SPEED = 1.25;
+    const SPRINT_MULT = 2.0;
+
+    // ===== Trackpad two-finger scroll => PAN on floor =====
+    // On Mac: pinch = wheel with ctrlKey=true (let OrbitControls zoom).
+    // Normal two-finger scroll = ctrlKey=false (we convert to pan).
+    function panOnFloor(deltaX, deltaY) {
+      if (!roomLoaded) return;
+
+      const dist = camera.position.distanceTo(controls.target);
+      const panScale = dist * 0.0015;
+
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      right.y = 0; right.normalize();
+
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      forward.y = 0; forward.normalize();
+
+      const move = new THREE.Vector3();
+      move.addScaledVector(right,  -deltaX * panScale);
+      move.addScaledVector(forward, deltaY * panScale);
+
+      camera.position.add(move);
+      controls.target.add(move);
+
+      clampToRoom();
+      controls.update();
+    }
+
+    renderer.domElement.addEventListener("wheel", (e) => {
+      // pinch on Mac -> OrbitControls zoom
+      if (e.ctrlKey) return;
+
+      // otherwise pan
+      e.preventDefault();
+      panOnFloor(e.deltaX, e.deltaY);
+    }, { passive: false });
+
+    // ===== Load GLB =====
     const loader = new GLTFLoader();
-
     loader.load(
-      ROOM_GLB_URL,
+      "./kumo-room.glb",
       (gltf) => {
         const room = gltf.scene;
         scene.add(room);
 
-        // Compute bounds
+        // TEMP: show interior even if normals are flipped
+        room.traverse((obj) => {
+          if (obj.isMesh && obj.material) {
+            obj.material.side = THREE.DoubleSide;
+            obj.material.needsUpdate = true;
+          }
+        });
+
+        // Center the room at origin
         const box = new THREE.Box3().setFromObject(room);
         const center = new THREE.Vector3();
         box.getCenter(center);
-
-        // Recenter room so its middle is at world origin (simplifies "middle of room")
         room.position.sub(center);
 
-        // Recompute after recenter
+        // Recompute bounds after recenter
         const box2 = new THREE.Box3().setFromObject(room);
-        const center2 = new THREE.Vector3();
-        box2.getCenter(center2);
 
         FLOOR_Y = box2.min.y;
-        CENTER_X = center2.x;
-        CENTER_Z = center2.z;
 
-        // Put "you" in the middle at floor level + eye height
-        camera.position.set(CENTER_X, FLOOR_Y + EYE_HEIGHT, CENTER_Z);
+        // Room limits in X/Z with padding so you don't clip walls
+        ROOM_MIN_X = box2.min.x + WALL_PADDING;
+        ROOM_MAX_X = box2.max.x - WALL_PADDING;
+        ROOM_MIN_Z = box2.min.z + WALL_PADDING;
+        ROOM_MAX_Z = box2.max.z - WALL_PADDING;
 
-        // Controls rotate in place around your head position
-        controls.target.set(CENTER_X, FLOOR_Y + EYE_HEIGHT, CENTER_Z);
+        // Standing height
+        const y = FLOOR_Y + FLOOR_PADDING + EYE_HEIGHT;
 
-        // Allow only a little "lean" zoom (optional)
-        controls.minDistance = 0.05;
-        controls.maxDistance = 1.2;
+        // Start in the middle (since we recentered, that's ~0,0)
+        controls.target.set(0, y, 0);
 
+        // Start camera slightly behind you so zoom works
+        camera.position.set(0, y, 0.8);
+
+        // Zoom range
+        controls.minDistance = 0.2;
+        controls.maxDistance = 3.0;
+
+        // Clipping planes
+        camera.near = 0.01;
+        camera.far = Math.max(2000, box2.getSize(new THREE.Vector3()).length() * 10);
+        camera.updateProjectionMatrix();
+
+        roomLoaded = true;
+        clampToRoom();
         controls.update();
 
-        console.log("GLB loaded ✅", { floorY: FLOOR_Y, centerX: CENTER_X, centerZ: CENTER_Z });
+        console.log("GLB loaded ✅", {
+          floorY: FLOOR_Y,
+          bounds: { ROOM_MIN_X, ROOM_MAX_X, ROOM_MIN_Z, ROOM_MAX_Z }
+        });
       },
-      (xhr) => {
-        if (xhr.total) console.log("Loading:", Math.round((xhr.loaded / xhr.total) * 100) + "%");
-      },
+      undefined,
       (err) => console.error("GLB load error:", err)
     );
 
+    // ===== Resize =====
     function resize() {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
@@ -138,12 +265,43 @@
     window.addEventListener("resize", resize, { passive: true });
     resize();
 
-    function animate() {
-      // Lock "standing" height (prevents drift from touch gestures)
-      camera.position.y = FLOOR_Y + EYE_HEIGHT;
+    // ===== Animate =====
+    const clock = new THREE.Clock();
 
-      // Keep target locked to your head position (rotate in place)
-      controls.target.set(CENTER_X, FLOOR_Y + EYE_HEIGHT, CENTER_Z);
+    function animate() {
+      const dt = Math.min(clock.getDelta(), 0.05);
+
+      if (roomLoaded) {
+        // Keyboard walk: move camera + target together on XZ plane
+        const input = getMoveInput();
+        const moveZ = (input.forward - input.back);
+        const moveX = (input.right - input.left);
+
+        if (moveZ !== 0 || moveX !== 0) {
+          const dirForward = new THREE.Vector3();
+          camera.getWorldDirection(dirForward);
+          dirForward.y = 0;
+          dirForward.normalize();
+
+          const dirRight = new THREE.Vector3().crossVectors(dirForward, new THREE.Vector3(0, 1, 0)).normalize();
+
+          const speed = WALK_SPEED * (input.sprint ? SPRINT_MULT : 1);
+          const move = new THREE.Vector3();
+          move.addScaledVector(dirForward, moveZ * speed * dt);
+          move.addScaledVector(dirRight,   moveX * speed * dt);
+
+          camera.position.add(move);
+          controls.target.add(move);
+        }
+
+        // Keep standing height (don’t overwrite XZ or zoom will break)
+        const y = FLOOR_Y + FLOOR_PADDING + EYE_HEIGHT;
+        camera.position.y = y;
+        controls.target.y = y;
+
+        // After any movement/zoom/rotate, clamp to room
+        clampToRoom();
+      }
 
       controls.update();
       renderer.render(scene, camera);
