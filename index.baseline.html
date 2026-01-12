@@ -6,8 +6,7 @@
   <title>Kumo Room (Local)</title>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
-    canvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
-    canvas:active { cursor: grabbing; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
 
     .hud {
       position: fixed; left: 12px; top: 12px; z-index: 10;
@@ -26,11 +25,12 @@
 
   <div class="hud">
     <b>Kumo Room</b>
-    <div class="small">Click + drag = look (up/down + left/right)</div>
-    <div class="small">Trackpad: scroll up/down = walk · horizontal scroll = look left/right</div>
+    <div class="small">Trackpad: 2-finger scroll = pan · pinch = zoom</div>
+    <div class="small">Touch: 1 finger = look · 2 fingers = pan/zoom</div>
     <div class="small">Keys: WASD / Arrows move · Shift sprint</div>
   </div>
 
+  <!-- Import map so OrbitControls/GLTFLoader resolve "three" correctly -->
   <script type="importmap">
   {
     "imports": {
@@ -57,7 +57,8 @@
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 5000);
 
-    // ===== Lighting =====
+    // ===== Lighting (fix "one wall black") =====
+    // Soft base light + ambient fill so nothing goes pitch black
     const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 2.2);
     scene.add(hemi);
 
@@ -68,6 +69,7 @@
     key.position.set(5, 10, 5);
     scene.add(key);
 
+    // Extra gentle fills (keeps depth but avoids dead-black corners)
     const fill1 = new THREE.DirectionalLight(0xffffff, 0.55);
     fill1.position.set(-6, 6, -6);
     scene.add(fill1);
@@ -76,14 +78,25 @@
     fill2.position.set(6, 4, -10);
     scene.add(fill2);
 
-    // ===== OrbitControls (we keep target + damping, but disable interactions) =====
+    // ===== OrbitControls =====
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
 
-    controls.enablePan = false;
-    controls.enableZoom = false;
-    controls.enableRotate = false;
+    controls.enablePan = true;
+    controls.enableZoom = true;  // pinch zoom works
+    controls.zoomSpeed = 0.8;
+    controls.rotateSpeed = 0.6;
+
+    // Touch gestures
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN
+    };
+
+    // Standing-ish look limits
+    controls.minPolarAngle = Math.PI * 0.30;
+    controls.maxPolarAngle = Math.PI * 0.70;
 
     renderer.domElement.style.touchAction = "none";
 
@@ -91,11 +104,11 @@
     const EYE_HEIGHT = 1.6;
     const FLOOR_PADDING = 0.05;
 
-    // ===== Room bounds =====
+    // ===== Room bounds (computed after GLB loads) =====
     let FLOOR_Y = 0;
     let ROOM_MIN_X = -Infinity, ROOM_MAX_X = Infinity;
     let ROOM_MIN_Z = -Infinity, ROOM_MAX_Z = Infinity;
-    const WALL_PADDING = 0.20;
+    const WALL_PADDING = 0.20; // buffer away from walls
     let roomLoaded = false;
 
     function clamp(v, min, max) {
@@ -110,12 +123,14 @@
       );
     }
 
+    // Robust bounds: update matrices, use Box3, fallback to mesh bounds if needed
     function computeBoundsRobust(root) {
       root.updateMatrixWorld(true);
 
       const box = new THREE.Box3().setFromObject(root);
       if (!box.isEmpty()) return box;
 
+      // Fallback: union mesh bounding boxes in world space
       const fallback = new THREE.Box3();
       const temp = new THREE.Box3();
 
@@ -156,6 +171,7 @@
         camera.position.z += dz;
       }
 
+      // Clamp camera too (zoom/rotate can push it)
       camera.position.x = clamp(camera.position.x, ROOM_MIN_X, ROOM_MAX_X);
       camera.position.z = clamp(camera.position.z, ROOM_MIN_Z, ROOM_MAX_Z);
 
@@ -182,102 +198,39 @@
     const WALK_SPEED = 1.25;
     const SPRINT_MULT = 2.0;
 
-    // ===== Look state (yaw + pitch) =====
-    let yaw = 0;                     // left/right
-    let pitch = 0;                   // up/down
-    const MAX_PITCH = Math.PI * 0.49; // ~88° (prevents flip)
-    const LOOK_DISTANCE = 1.0;
-
-    // Sensitivity
-    const YAW_SENS_WHEEL  = 0.0022;
-    const WALK_SENS_WHEEL = 0.0025;   // scroll walk sensitivity
-    const DRAG_SENS_YAW   = 0.0040;   // click-drag sensitivity
-    const DRAG_SENS_PITCH = 0.0040;
-
-    function getForwardXZFromYaw() {
-      return new THREE.Vector3(Math.sin(yaw), 0, -Math.cos(yaw)).normalize();
-    }
-
-    function getLookDirFromYawPitch() {
-      const cosP = Math.cos(pitch);
-      const dir = new THREE.Vector3(
-        Math.sin(yaw) * cosP,
-        Math.sin(pitch),
-        -Math.cos(yaw) * cosP
-      );
-      return dir.normalize();
-    }
-
-    function updateLookTargetFromYawPitch() {
-      const dir = getLookDirFromYawPitch();
-      controls.target.copy(camera.position).addScaledVector(dir, LOOK_DISTANCE);
-    }
-
-    // ===== Click + drag to look (up/down + left/right) =====
-    let dragging = false;
-    let lastX = 0, lastY = 0;
-
-    renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-
-    renderer.domElement.addEventListener("pointerdown", (e) => {
-      // Left click / primary pointer
-      if (e.button !== 0) return;
-      dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      renderer.domElement.setPointerCapture(e.pointerId);
-    });
-
-    renderer.domElement.addEventListener("pointermove", (e) => {
-      if (!dragging || !roomLoaded) return;
-
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
-      lastX = e.clientX;
-      lastY = e.clientY;
-
-      // Drag right => look right. Drag up => look up.
-      yaw   += -dx * DRAG_SENS_YAW;
-      pitch += -dy * DRAG_SENS_PITCH;
-      pitch = clamp(pitch, -MAX_PITCH, MAX_PITCH);
-
-      updateLookTargetFromYawPitch();
-      controls.update();
-    });
-
-    function endDrag(e) {
-      dragging = false;
-      try { renderer.domElement.releasePointerCapture(e.pointerId); } catch {}
-    }
-    renderer.domElement.addEventListener("pointerup", endDrag);
-    renderer.domElement.addEventListener("pointercancel", endDrag);
-
-    // ===== Trackpad wheel: vertical scroll = walk (reversed), horizontal = look =====
-    renderer.domElement.addEventListener("wheel", (e) => {
-      // Pinch gesture on Mac trackpad => ctrlKey=true wheel events. Swallow it.
-      if (e.ctrlKey) {
-        e.preventDefault();
-        return;
-      }
-
-      e.preventDefault();
+    // ===== Trackpad two-finger scroll => PAN on floor =====
+    // On Mac: pinch = wheel with ctrlKey=true => let OrbitControls handle zoom.
+    // Normal two-finger scroll = ctrlKey=false => we convert to pan.
+    function panOnFloor(deltaX, deltaY) {
       if (!roomLoaded) return;
 
-      // Horizontal scroll => yaw
-      yaw += -e.deltaX * YAW_SENS_WHEEL;
+      const dist = camera.position.distanceTo(controls.target);
+      const panScale = dist * 0.0015;
 
-      // Vertical scroll => walk (reversed as requested)
-      // Scroll UP => forward, Scroll DOWN => backward
-      const step = (-e.deltaY) * WALK_SENS_WHEEL;
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      right.y = 0; right.normalize();
 
-      const fwd = getForwardXZFromYaw();
-      camera.position.addScaledVector(fwd, step);
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      forward.y = 0; forward.normalize();
 
-      lockStandingHeight();
-      updateLookTargetFromYawPitch();
+      const move = new THREE.Vector3();
+      move.addScaledVector(right,  -deltaX * panScale);
+      move.addScaledVector(forward, deltaY * panScale);
+
+      camera.position.add(move);
+      controls.target.add(move);
+
       clampToRoom();
-
       controls.update();
+    }
+
+    renderer.domElement.addEventListener("wheel", (e) => {
+      // Pinch gesture on Mac trackpad -> OrbitControls zoom
+      if (e.ctrlKey) return;
+
+      // Otherwise treat as pan
+      e.preventDefault();
+      panOnFloor(e.deltaX, e.deltaY);
     }, { passive: false });
 
     // ===== Load GLB =====
@@ -288,6 +241,7 @@
         const room = gltf.scene;
         scene.add(room);
 
+        // Make sure interior walls render (and help with any flipped normals)
         room.traverse((obj) => {
           if (obj.isMesh && obj.material) {
             obj.material.side = THREE.DoubleSide;
@@ -295,36 +249,44 @@
           }
         });
 
+        // Compute bounds BEFORE recenter
         const preBox = computeBoundsRobust(room);
         if (preBox.isEmpty()) {
           console.error("Bounds are empty — no mesh geometry exported in the GLB.");
           return;
         }
 
+        // Center room at origin
         const preCenter = new THREE.Vector3();
         preBox.getCenter(preCenter);
         room.position.sub(preCenter);
         room.updateMatrixWorld(true);
 
+        // Compute bounds AFTER recenter
         const box = computeBoundsRobust(room);
         const size = new THREE.Vector3();
         box.getSize(size);
 
         FLOOR_Y = box.min.y;
 
+        // Clamp region (XZ) with buffer away from walls
         ROOM_MIN_X = box.min.x + WALL_PADDING;
         ROOM_MAX_X = box.max.x - WALL_PADDING;
         ROOM_MIN_Z = box.min.z + WALL_PADDING;
         ROOM_MAX_Z = box.max.z - WALL_PADDING;
 
+        // Start at center of room
         const y = FLOOR_Y + FLOOR_PADDING + EYE_HEIGHT;
+        controls.target.set(0, y, 0);
 
-        yaw = 0;
-        pitch = 0;
-
+        // Start camera slightly behind so pinch zoom works
         camera.position.set(0, y, 0.8);
-        updateLookTargetFromYawPitch();
 
+        // Zoom range
+        controls.minDistance = 0.2;
+        controls.maxDistance = 3.0;
+
+        // Clipping planes
         camera.near = 0.01;
         camera.far = Math.max(2000, size.length() * 10);
         camera.updateProjectionMatrix();
@@ -335,7 +297,6 @@
         console.log("Room bounds:", box.min, box.max, "size:", size);
         console.log("Clamp X:", ROOM_MIN_X, ROOM_MAX_X, "Z:", ROOM_MIN_Z, ROOM_MAX_Z, "FloorY:", FLOOR_Y);
 
-        lockStandingHeight();
         clampToRoom();
         controls.update();
       },
@@ -361,12 +322,17 @@
       const dt = Math.min(clock.getDelta(), 0.05);
 
       if (roomLoaded && boundsAreFinite()) {
+        // Keyboard walk: move camera + target together on XZ plane
         const input = getMoveInput();
         const moveZ = (input.forward - input.back);
         const moveX = (input.right - input.left);
 
         if (moveZ !== 0 || moveX !== 0) {
-          const dirForward = getForwardXZFromYaw();
+          const dirForward = new THREE.Vector3();
+          camera.getWorldDirection(dirForward);
+          dirForward.y = 0;
+          dirForward.normalize();
+
           const dirRight = new THREE.Vector3().crossVectors(dirForward, new THREE.Vector3(0, 1, 0)).normalize();
 
           const speed = WALK_SPEED * (input.sprint ? SPRINT_MULT : 1);
@@ -375,10 +341,11 @@
           move.addScaledVector(dirRight,   moveX * speed * dt);
 
           camera.position.add(move);
+          controls.target.add(move);
         }
 
+        // Keep standing height and prevent leaving room
         lockStandingHeight();
-        updateLookTargetFromYawPitch();
         clampToRoom();
       }
 
