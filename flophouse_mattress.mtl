@@ -1,0 +1,13 @@
+# Blender 5.1.0 Alpha MTL File: 'flophouse_mattress.blend'
+# www.blender.org
+
+newmtl MATTRESS
+Ns 1000.000000
+Ka 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.450000
+d 1.000000
+illum 2
+map_Kd mattress_d.png
+map_Ks mattress_s.png
+map_Bump -bm 1.000000 mattress_n.png

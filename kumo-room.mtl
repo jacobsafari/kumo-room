@@ -1,0 +1,13 @@
+# Blender 5.1.0 Alpha MTL File: 'kumo-room.blend'
+# www.blender.org
+
+newmtl MATTRESS
+Ns 1000.000000
+Ka 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd /Users/jacobcooper/Desktop/Assets/Users/jacobcooper/Downloads/flophouse-bed/Polymer/mattress_d.png
+map_Ks /Users/jacobcooper/Desktop/Assets/Users/jacobcooper/Downloads/flophouse-bed/Polymer/mattress_s.png
+map_Bump -bm 1.000000 /Users/jacobcooper/Desktop/Assets/Users/jacobcooper/Downloads/flophouse-bed/Polymer/mattress_n.png
